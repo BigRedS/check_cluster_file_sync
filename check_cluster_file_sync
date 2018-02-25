@@ -1,0 +1,213 @@
+#! /usr/bin/perl
+
+use strict;
+use Getopt::Long;
+use Data::Dumper;
+
+my @files = ();
+my $ssh = '/usr/bin/ssh';
+my $ssh_key = undef;
+my $localhost = get_local_hostname();
+my @hosts = undef;
+
+GetOptions(
+	'file=s' => \@files,
+	'ssh-key|i=s' => \$ssh_key,
+	'host|h=s' => \@hosts,
+	'localhost=s' => \$localhost,
+	
+) or abort("Error parsing command-line options");
+
+my %checksums;
+my @problems;
+
+if( !$hosts[0] and $localhost =~ m/-a$/){
+	my $otherhost = $localhost;
+	$otherhost =~ s/a$/b/;
+	$hosts[0] = $otherhost;
+}
+
+my @files_tmp;
+foreach my $file (@files){
+	unless($file =~ m/^'/ and $file =~ m/'$/){
+		$file = "'".$file."'";
+	}
+	push(@files_tmp, $file);
+}
+@files = @files_tmp;
+
+debug("Remote Hosts: ".join(" ", @hosts));
+debug("Local host: $localhost");
+debug("Files: ".join(", ", @files));
+
+# First, get the sums. get_local_checksums just runs md5sum with the contents of
+#  @files as a list of arguments, and its remote counterpart does same, just via
+# ssh.
+#
+# process_md5sum_output iterates through the returned lines and pushes to the
+# @problems array for each line that doesn't match the <hash> <path> pattern, and
+# populates the %checksums hash with any that do, im the structure:
+# 
+# $checksums->{file}->{host} = hash
+#
+debug("Collecting hashes");
+debug(" Host: $localhost");
+process_md5sum_output($localhost, get_local_checksums(@files) );
+
+foreach my $host(@hosts){
+	next unless $host =~ m/.+/;
+	debug(" Host: $host");
+	my @lines = get_remote_checksums($host, @files);
+	process_md5sum_output($host, @lines);
+}
+
+debug("Hashes collected");
+
+# With the hashes collected, go through each file in the %checksums hash, and
+# for each one figure out if all the sums are equal.
+# To do this, a $file_checksums hash is created (for each file), which is of the 
+# structure:
+#
+# $file_checksums{sum} = (file1, file2, file3)
+#
+# So if there's more than one entry in the hash there's definitely a problem, 
+# and 
+# we can make a guess as to which host (where the set of hosts is greater than 
+# two) is problematic by comparing the size of these arrays.
+#
+# Succinct_checksum_differences just returns a string of the form
+#
+# a1..bb:hostname1; c3..4s: hostname2,hostname3; ...
+#
+# where a1 is the first two and bb the last two characters of the hash of the 
+# file on hostname1, and c3 and 4s the first two and last two of the file on 
+# hostname 2 and hostname 3.
+#
+
+foreach my $file (sort(keys(%checksums))){
+	my %file_checksums;
+	foreach my $host (sort(keys(%{$checksums{$file}}))){
+		my $sum = $checksums{$file}->{$host};
+		push(@{$file_checksums{$sum}}, $host);
+	}
+	if(scalar(keys(%file_checksums)) > 1){
+		push(@problems, [$file, succinct_checksum_differences(\%file_checksums)]);
+	}
+}
+
+# If @problems has anything it, we need to return critical. We'll here make use 
+# of Icingas' 'Status Information' which is multi-line text after a | and a 
+# newline:
+if(scalar(@problems)){
+	print "CRITICAL: ";
+	foreach my $problem(@problems){
+		print $problem->[0]." ";
+	}
+	print "| Checked ".scalar(@files)." files on ".scalar(@hosts). " hosts\n";
+	foreach my $problem (@problems){
+		print "  ".$problem->[0].' : '.$problem->[1]."\n";
+	}
+	exit 2;
+}
+
+print "OK : ".scalar(@files)." files on ".scalar(@hosts). " hosts \n";
+exit 0;
+
+
+
+# # # #
+# # #
+# #
+#
+
+sub succinct_checksum_differences{
+	my $file_checksums = shift;
+	my @bits;
+	foreach my $sum (sort(keys(%{$file_checksums}))){
+		my $hosts = join(",", @{$file_checksums->{$sum}});
+		push(@bits, substr($sum,0,2)."..".substr($sum,30,2).":".$hosts);
+	}
+	return join('; ', @bits);
+}
+
+sub process_md5sum_output{
+	my $hostname = shift;
+	my @lines = @_;
+
+	foreach my $line (@lines){
+		chomp($line);
+		if($line =~ m#^([a-z0-9]{32})\s+(/\S+)#){
+			my ($sum,$file) = ($1,$2);
+			$checksums{$file}->{$hostname} = $sum;
+		}else{
+			push(@problems, [$hostname, $line]);
+		}
+	}
+}
+
+sub get_local_checksums{
+	my $files = @_;
+	my @cmd = create_checksum_command(@files);
+	push(@cmd, "2>&1");
+	my $cmd = join(" ", @cmd);
+	debug("  Command: $cmd");
+	my @output = `$cmd`;
+	my $retval = $?>>8;
+	if($retval != 0){
+		push(@problems, [$localhost, "md5sum failed"]);
+		debug("  COMMAND FAILED:");
+		foreach(@output){ debug("    ".$_); }
+	}
+	
+	return @output;
+}
+
+sub get_remote_checksums{
+	my $host = shift;
+	my @files = @_;
+	$host = "'$host'";
+	my @cmd;
+	push(@cmd, $ssh);
+	push(@cmd, "-i \"$ssh_key\"") if $ssh_key;
+	push(@cmd, $host);
+	push(@cmd, '"', create_checksum_command(@files), '"');
+	push(@cmd, '2>&1');
+	my $cmd = join(" ", @cmd);
+	debug("  command: $cmd");
+	my @output = `$cmd`;
+	my $retval = $?>>8;
+	if($retval != 0){
+		push(@problems, [$host, "ssh or md5sum failed"]);
+		debug("  COMMAND FAILED:");
+		foreach(@output){ debug("    ".$_); }
+	}
+	return @output;
+}
+
+
+sub create_checksum_command{
+	my @files = @_;
+	my @cmd = ('md5sum', @files);
+	return @cmd;
+}
+
+sub get_local_hostname{
+	my $hostname = `hostname`;
+	chomp($hostname);
+	return $hostname;
+}
+
+
+sub abort{
+	my $message = shift;
+	chomp($message);
+	print STDERR "ERROR: $message\n";
+	exit 4;
+}
+
+sub debug{
+	return unless $ENV{DEBUG} > 0;
+	my $message = shift;
+	chomp($message);
+	print "DEBUG: $message\n";
+}
