@@ -1,0 +1,38 @@
+
+Checks files are in-sync across multiple machines.
+
+Usage:
+
+  check_cluster_file_sync [options]  --file [path] --file [path]
+
+Options:
+
+  --file [path] 
+
+  Specify the path to a file to check. Set multiple times to check multiple
+  files.
+
+  --host [hostname], -h [hostname]
+
+  Specify the host(s) to check these files on (localhost is always checked). 
+  set multiple times to check multiple hosts. 
+  If left unset on a machine with a hostname ending '-a', files will be compared
+  with the '-b' equivalent.
+
+  --help, -h
+
+  Show this help
+
+  --localhost
+
+  Set the hostname for the localhost (if `hostname` is incorrect).
+
+  --ssh-key [path], -i [path]
+
+  Path to an SSH key to use to connect to the other hosts. Must be the same
+  for all hosts.
+
+  --version, -v
+
+  Show version and exit
+
